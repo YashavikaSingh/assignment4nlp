@@ -24,11 +24,11 @@ def initialize_model(args):
         # Load pretrained T5 model
         model = T5ForConditionalGeneration.from_pretrained('google-t5/t5-small')
     else:
-        # Initialize from scratch using T5 config
+        # Initialize from config (training from scratch)
         config = T5Config.from_pretrained('google-t5/t5-small')
         model = T5ForConditionalGeneration(config)
     
-    model.to(DEVICE)
+    model = model.to(DEVICE)
     return model
 
 def mkdir(dirpath):
@@ -45,18 +45,24 @@ def save_model(checkpoint_dir, model, best):
         checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pt')
     else:
         checkpoint_path = os.path.join(checkpoint_dir, 'latest_model.pt')
-    torch.save(model.state_dict(), checkpoint_path)
+    
+    torch.save({
+        'model_state_dict': model.state_dict(),
+    }, checkpoint_path)
 
 def load_model_from_checkpoint(args, best):
     # Load model from a checkpoint
     model = initialize_model(args)
-    model_type = 'ft' if args.finetune else 'scr'
-    checkpoint_dir = os.path.join('checkpoints', f'{model_type}_experiments', args.experiment_name)
-    if best:
-        checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pt')
+    checkpoint_name = 'best_model.pt' if best else 'latest_model.pt'
+    checkpoint_path = os.path.join(args.checkpoint_dir, checkpoint_name)
+    
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded model from {checkpoint_path}")
     else:
-        checkpoint_path = os.path.join(checkpoint_dir, 'latest_model.pt')
-    model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE))
+        print(f"Warning: Checkpoint {checkpoint_path} not found. Using initialized model.")
+    
     return model
 
 def initialize_optimizer_and_scheduler(args, model, epoch_length):

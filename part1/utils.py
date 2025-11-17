@@ -13,23 +13,6 @@ import argparse
 from nltk.corpus import wordnet
 from nltk import word_tokenize
 from nltk.tokenize.treebank import TreebankWordDetokenizer
-import nltk
-
-# Download required NLTK resources if not already present
-# This ensures punkt_tab, wordnet, and punkt are available
-_resources_to_download = ['punkt_tab', 'wordnet', 'punkt']
-for resource in _resources_to_download:
-    try:
-        # Try to find the resource - if found, skip download
-        if resource == 'punkt_tab':
-            nltk.data.find('tokenizers/punkt_tab')
-        elif resource == 'wordnet':
-            nltk.data.find('corpora/wordnet')
-        elif resource == 'punkt':
-            nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        # Resource not found, download it
-        nltk.download(resource, quiet=True)
 
 random.seed(0)
 

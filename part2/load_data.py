@@ -31,57 +31,108 @@ class T5Dataset(Dataset):
         self.data = self.process_data(data_folder, split, self.tokenizer)
 
     def process_data(self, data_folder, split, tokenizer):
-        # Load natural language queries
+        '''
+        Process natural language and SQL data files.
+        For test set, only load natural language queries.
+        '''
         nl_path = os.path.join(data_folder, f'{split}.nl')
-        nl_queries = load_lines(nl_path)
+        nl_lines = load_lines(nl_path)
         
-        # For test set, we don't have SQL queries
         if split == 'test':
-            return [(nl, None) for nl in nl_queries]
-        
-        # Load SQL queries for train and dev sets
-        sql_path = os.path.join(data_folder, f'{split}.sql')
-        sql_queries = load_lines(sql_path)
-        
-        return list(zip(nl_queries, sql_queries))
+            # Test set only has natural language queries
+            return [(nl, None) for nl in nl_lines]
+        else:
+            # Train and dev sets have both NL and SQL
+            sql_path = os.path.join(data_folder, f'{split}.sql')
+            sql_lines = load_lines(sql_path)
+            return list(zip(nl_lines, sql_lines))
     
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
+        '''
+        Returns:
+        - For train/dev: (encoder_input_ids, decoder_input_ids, decoder_target_ids, initial_decoder_token)
+        - For test: (encoder_input_ids, initial_decoder_token)
+        '''
         nl_query, sql_query = self.data[idx]
         
         # Tokenize encoder input (natural language)
-        encoder_input = self.tokenizer(
+        encoder_encoded = self.tokenizer(
             nl_query,
+            max_length=512,
             padding=False,
             truncation=True,
-            max_length=512,
-            return_tensors='pt'
-        )['input_ids'].squeeze(0)
+            return_tensors=None
+        )
+        encoder_input_ids = encoder_encoded['input_ids']
+        
+        # Get initial decoder token (use extra_id_0 as BOS token)
+        initial_decoder_token = self.tokenizer.convert_tokens_to_ids('<extra_id_0>')
         
         if self.split == 'test':
-            # For test set, we don't have SQL queries
-            return encoder_input, None, None, None
-        
-        # Tokenize decoder input and targets (SQL)
-        # Decoder input should have a beginning of sentence token
-        # T5 uses <pad> as the decoder start token, but we can use an extra_id token
-        # Actually, T5 uses the pad token as decoder start, so we'll prepend it
-        sql_tokens = self.tokenizer(
-            sql_query,
-            padding=False,
-            truncation=True,
-            max_length=512,
-            return_tensors='pt'
-        )['input_ids'].squeeze(0)
-        
-        # Decoder input: prepend pad token (which is 0) or use extra_id_0
-        # Actually, for T5, the decoder input should start with pad token (0)
-        decoder_input = torch.cat([torch.tensor([self.tokenizer.pad_token_id]), sql_tokens[:-1]])
-        decoder_targets = sql_tokens
-        
-        return encoder_input, decoder_input, decoder_targets, nl_query
+            return {
+                'encoder_input_ids': encoder_input_ids,
+                'initial_decoder_token': initial_decoder_token
+            }
+        else:
+            # Tokenize decoder input and target (SQL)
+            # Decoder input should start with <extra_id_0>
+            # Decoder target should be aligned with logits (shifted by one position)
+            decoder_input_text = f'<extra_id_0>{sql_query}'
+            
+            decoder_input_encoded = self.tokenizer(
+                decoder_input_text,
+                max_length=512,
+                padding=False,
+                truncation=True,
+                return_tensors=None
+            )
+            
+            decoder_input_ids = decoder_input_encoded['input_ids']
+            
+            # Extract the extra_id_0 token ID
+            extra_id_0_id = self.tokenizer.convert_tokens_to_ids('<extra_id_0>')
+            
+            # Target should be the tokens after <extra_id_0>, aligned with logits
+            # If decoder_input_ids = [extra_id_0, token1, token2, ...], 
+            # then decoder_targets should be [token1, token2, ..., eos] with same length
+            # We need to find where extra_id_0 ends and SQL tokens begin
+            if decoder_input_ids[0] == extra_id_0_id:
+                # Remove the first token (<extra_id_0>) and add EOS at the end
+                decoder_target_ids = decoder_input_ids[1:] + [self.tokenizer.eos_token_id]
+                # Pad or truncate to match decoder_input_ids length
+                target_len = len(decoder_input_ids)
+                if len(decoder_target_ids) < target_len:
+                    # Pad with PAD_IDX
+                    decoder_target_ids = decoder_target_ids + [PAD_IDX] * (target_len - len(decoder_target_ids))
+                elif len(decoder_target_ids) > target_len:
+                    # Truncate
+                    decoder_target_ids = decoder_target_ids[:target_len]
+            else:
+                # Fallback: tokenize SQL separately
+                sql_encoded = self.tokenizer(
+                    sql_query,
+                    max_length=511,  # Leave room for EOS
+                    padding=False,
+                    truncation=True,
+                    return_tensors=None
+                )
+                decoder_target_ids = sql_encoded['input_ids'] + [self.tokenizer.eos_token_id]
+                # Ensure same length as decoder_input_ids
+                target_len = len(decoder_input_ids)
+                if len(decoder_target_ids) < target_len:
+                    decoder_target_ids = decoder_target_ids + [PAD_IDX] * (target_len - len(decoder_target_ids))
+                elif len(decoder_target_ids) > target_len:
+                    decoder_target_ids = decoder_target_ids[:target_len]
+            
+            return {
+                'encoder_input_ids': encoder_input_ids,
+                'decoder_input_ids': decoder_input_ids,
+                'decoder_target_ids': decoder_target_ids,
+                'initial_decoder_token': initial_decoder_token
+            }
 
 def normal_collate_fn(batch):
     '''
@@ -99,25 +150,23 @@ def normal_collate_fn(batch):
         * decoder_targets: The target tokens with which to train the decoder (the tokens following each decoder input)
         * initial_decoder_inputs: The very first input token to be decoder (only to be used in evaluation)
     '''
-    encoder_inputs = [item[0] for item in batch]
-    decoder_inputs = [item[1] for item in batch]
-    decoder_targets = [item[2] for item in batch]
-    nl_queries = [item[3] for item in batch]
+    encoder_input_ids_list = [torch.tensor(item['encoder_input_ids'], dtype=torch.long) for item in batch]
+    decoder_input_ids_list = [torch.tensor(item['decoder_input_ids'], dtype=torch.long) for item in batch]
+    decoder_target_ids_list = [torch.tensor(item['decoder_target_ids'], dtype=torch.long) for item in batch]
+    initial_decoder_tokens = [item['initial_decoder_token'] for item in batch]
     
-    # Pad encoder inputs
-    encoder_ids = pad_sequence(encoder_inputs, batch_first=True, padding_value=PAD_IDX)
+    # Pad sequences
+    encoder_ids = pad_sequence(encoder_input_ids_list, batch_first=True, padding_value=PAD_IDX)
+    decoder_inputs = pad_sequence(decoder_input_ids_list, batch_first=True, padding_value=PAD_IDX)
+    decoder_targets = pad_sequence(decoder_target_ids_list, batch_first=True, padding_value=PAD_IDX)
+    
+    # Create attention masks
     encoder_mask = (encoder_ids != PAD_IDX).long()
     
-    # Pad decoder inputs
-    decoder_input_ids = pad_sequence(decoder_inputs, batch_first=True, padding_value=PAD_IDX)
+    # Initial decoder inputs (for evaluation/generation)
+    initial_decoder_inputs = torch.tensor(initial_decoder_tokens, dtype=torch.long)
     
-    # Pad decoder targets
-    decoder_target_ids = pad_sequence(decoder_targets, batch_first=True, padding_value=PAD_IDX)
-    
-    # Initial decoder input is just the pad token (decoder start token for T5)
-    initial_decoder_inputs = torch.full((len(batch), 1), PAD_IDX, dtype=torch.long)
-    
-    return encoder_ids, encoder_mask, decoder_input_ids, decoder_target_ids, initial_decoder_inputs
+    return encoder_ids, encoder_mask, decoder_inputs, decoder_targets, initial_decoder_inputs
 
 def test_collate_fn(batch):
     '''
@@ -132,14 +181,17 @@ def test_collate_fn(batch):
         * encoder_mask: Mask of shape BxT associated with padding tokens in the encoder input
         * initial_decoder_inputs: The very first input token to be decoder (only to be used in evaluation)
     '''
-    encoder_inputs = [item[0] for item in batch]
+    encoder_input_ids_list = [torch.tensor(item['encoder_input_ids'], dtype=torch.long) for item in batch]
+    initial_decoder_tokens = [item['initial_decoder_token'] for item in batch]
     
-    # Pad encoder inputs
-    encoder_ids = pad_sequence(encoder_inputs, batch_first=True, padding_value=PAD_IDX)
+    # Pad sequences
+    encoder_ids = pad_sequence(encoder_input_ids_list, batch_first=True, padding_value=PAD_IDX)
+    
+    # Create attention masks
     encoder_mask = (encoder_ids != PAD_IDX).long()
     
-    # Initial decoder input is just the pad token (decoder start token for T5)
-    initial_decoder_inputs = torch.full((len(batch), 1), PAD_IDX, dtype=torch.long)
+    # Initial decoder inputs (for evaluation/generation)
+    initial_decoder_inputs = torch.tensor(initial_decoder_tokens, dtype=torch.long)
     
     return encoder_ids, encoder_mask, initial_decoder_inputs
 
