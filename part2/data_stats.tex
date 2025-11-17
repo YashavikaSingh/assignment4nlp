@@ -1,0 +1,35 @@
+\begin{table}[h!]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Statistics Name & Train & Dev \\
+\midrule
+Number of examples & 4225 & 466 \\
+Mean sentence length & 11.03 & 10.98 \\
+Mean SQL query length & 60.90 & 58.90 \\
+Vocabulary size (natural language) & 860 & 442 \\
+Vocabulary size (SQL) & 643 & 393 \\
+\bottomrule
+\end{tabular}
+\caption{Data statistics before any pre-processing.}
+\label{tab:data_stats_before}
+\end{table}
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Statistics Name & Train & Dev \\
+\midrule
+\multicolumn{3}{l}{\textbf{T5 fine-tuned model}} \\
+\midrule
+Mean encoder length & 18.10 & 18.07 \\
+Mean decoder input length & 218.37 & 212.05 \\
+Mean decoder target length & 218.37 & 212.05 \\
+Encoder vocabulary size & 792 & 466 \\
+Decoder vocabulary size & 557 & 397 \\
+\bottomrule
+\end{tabular}
+\caption{Data statistics after pre-processing.}
+\label{tab:data_stats_after}
+\end{table}
